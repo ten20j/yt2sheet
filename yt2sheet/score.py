@@ -140,6 +140,40 @@ def _pitch(midi: int, names: list[str]):
     return p
 
 
+# --------------------------------------------------------------------------- clefs
+
+
+def _next_clef(current: str, pitches: list[int]) -> str:
+    """Clef for a measure given the previous one; hysteresis avoids flip-flopping."""
+    if not pitches:
+        return current
+    ps = sorted(pitches)
+    lo, hi, med = ps[0], ps[-1], ps[len(ps) // 2]
+    if current == "bass" and lo >= 57 and med >= 64:
+        return "treble"
+    if current == "treble" and hi <= 62 and med < 55:
+        return "bass"
+    return current
+
+
+def _assign_clefs(part) -> None:
+    """Change clef per measure when a hand moves far out of its staff's register."""
+    from music21 import clef
+
+    measures = list(part.getElementsByClass("Measure"))
+    current = None
+    for m in measures:
+        pitches = [p.midi for n in m.recurse().notes for p in n.pitches]
+        if current is None:
+            first = m.clef or clef.TrebleClef()
+            current = "bass" if isinstance(first, clef.BassClef) else "treble"
+            continue
+        new = _next_clef(current, pitches)
+        if new != current:
+            m.clef = clef.TrebleClef() if new == "treble" else clef.BassClef()
+            current = new
+
+
 # --------------------------------------------------------------------------- score
 
 
@@ -226,7 +260,9 @@ def build_score(
         parts.append(part)
 
     for part in parts:
-        score.insert(0, part.makeNotation())
+        measured = part.makeNotation()
+        _assign_clefs(measured)
+        score.insert(0, measured)
     measured = list(score.parts)
     score.insert(0, layout.StaffGroup(measured, name="Piano", abbreviation="Pno.", symbol="brace"))
     return score, k

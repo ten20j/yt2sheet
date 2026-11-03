@@ -74,3 +74,13 @@ def test_fast_continuous_motion_is_notated_as_eighths():
     meter, beats, q = notate(BALLAD, 0)
     assert 60 <= tempo_bpm(beats) <= 85
     assert onset_accuracy(BALLAD, q) >= 0.95
+
+
+def test_clef_changes_follow_register():
+    from yt2sheet.score import _next_clef
+
+    assert _next_clef("bass", [67, 71, 74, 79]) == "treble"  # LH climbs high
+    assert _next_clef("treble", [67, 60, 62]) == "treble"  # hysteresis: stays
+    assert _next_clef("treble", [43, 47, 50, 55]) == "bass"
+    assert _next_clef("bass", [48, 60, 64]) == "bass"
+    assert _next_clef("bass", []) == "bass"
