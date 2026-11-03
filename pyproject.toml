@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yt2sheet"
+version = "0.1.0"
+description = "Piano sheet music (PDF/MusicXML/MIDI) from a YouTube link or audio file"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "yt-dlp[default]",  # [default] brings yt-dlp-ejs, needed for YouTube
+    "torch",
+    "transkun>=2.0",
+    "moduleconf",
+    "pretty_midi",
+    "numpy",
+    "librosa",
+    "music21>=9",
+    "lilypond",
+    "verovio",
+    "cairosvg",
+    "pypdf",
+]
+
+[project.optional-dependencies]
+web = ["flask>=3"]
+test = ["pytest"]
+
+[project.scripts]
+yt2sheet = "yt2sheet.cli:main"
+yt2sheet-web = "yt2sheet.web:main"
+
+[tool.setuptools]
+packages = ["yt2sheet"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore::FutureWarning"]
