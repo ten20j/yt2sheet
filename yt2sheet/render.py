@@ -22,6 +22,19 @@ def _lilypond_bin() -> Path | None:
         return Path(found) if found else None
 
 
+def _stack_lower_fingerings(src: str) -> str:
+    """musicxml2ly writes a chord's fingerings in note order (lowest first). Above the staff
+    LilyPond stacks them upwards, which is right; below the staff it stacks them downwards,
+    putting the lowest note's finger on top. Reverse those so the stack mirrors the chord."""
+
+    def fix(m: re.Match) -> str:
+        digits = re.findall(r"_([1-5])", m.group(0))
+        arp = "\\arpeggio " if "\\arpeggio" in m.group(0) else ""
+        return arp + " ".join("_" + d for d in reversed(digits)) + " "
+
+    return re.sub(r"(?:(?:\\arpeggio\s+)?_[1-5]\s+){2,}", fix, src)
+
+
 def render_lilypond(musicxml: Path, pdf: Path, paper: str = "letter") -> Path:
     ly_bin = _lilypond_bin()
     if ly_bin is None:
@@ -48,6 +61,7 @@ def render_lilypond(musicxml: Path, pdf: Path, paper: str = "letter") -> Path:
     # musicxml2ly copies the title (MusicXML movement-title) into a subtitle; drop it, and the tagline.
     src = re.sub(r"^\s*subtitle\s*=.*\n", "", src, flags=re.M)
     src = re.sub(r"(\\header\s*\{)", r"\1\n    tagline = ##f", src, count=1)
+    src = _stack_lower_fingerings(src)
     ly_file.write_text(src)
 
     out_base = pdf.with_suffix("")

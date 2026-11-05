@@ -65,6 +65,9 @@ A 4-minute piece takes about 2 minutes on a 4-core CPU; with an NVIDIA GPU add `
 | `--key E-` | override key detection (`E-` = E-flat major, `f#` = F-sharp minor) |
 | `--no-triplets` | rubato made straight rhythms come out as triplets |
 | `--grid 8` | only use 8th notes and longer (simpler, less exact) |
+| `--fingering all` | finger numbers on every note (default `smart`: where the hand moves; `none` to hide) |
+| `--reach 14` | widest chord one hand plays at once, in semitones (default 12 = octave; 14 for large hands) |
+| `--keep-doublings` | never drop octave-doubled notes from too-wide chords (they are rolled instead) |
 | `--split-point 60` | fixed hand split at middle C instead of the automatic one |
 | `--downbeat 1` | the barlines are shifted; this moves the first downbeat by N beats |
 | `--cookies cookies.txt` | YouTube asks you to sign in |
@@ -87,8 +90,19 @@ with different options: `yt2sheet output/my-piece-performance.mid --time-signatu
   better. Long notes' ends snap more coarsely (key releases are imprecise), and notes released under
   the sustain pedal are written to the next note instead of with rests.
 - **Barlines**: the downbeat is placed where accented, long bass notes fall.
-- **Hands**: a cost model per chord: distance from each hand's recent notes, a hand-span limit
-  that includes notes still held, and a preference against splitting close chords.
+- **Hands**: every onset's notes are split into a lower (LH) and upper (RH) part. A beam search
+  over the whole piece picks the splits with the lowest total cost: distance from each hand's
+  recent notes, a span limit that includes notes still held, crossed hands, and splitting a
+  close chord between the hands.
+- **Playability**: a chord one hand cannot reach (`--reach`, default an octave) gives a note to the
+  other hand if it fits there, else drops an octave doubling (never the melody or bass note), else
+  is marked as rolled. A hand never gets more than five notes at once.
+- **Fingering**: dynamic programming over each hand's notes, minimising the ergonomic cost model of
+  Parncutt et al. (1997): comfortable and practical spans per finger pair, weak fingers, thumb on
+  black keys, thumb passing, and three-note hand-position rules. It is solved exactly with a
+  second-order Viterbi search, so a fingering is chosen with the following notes in mind. With
+  `smart` fingering, numbers are printed where the hand changes position or starts after a rest,
+  as in printed music.
 - **Notation**: key detection (Krumhansl-Schmuckler via music21), key-aware note spelling, then
   music21 for measures, ties and beams, and LilyPond for engraving.
 
@@ -99,6 +113,8 @@ best on solo piano recordings. Expect to fix things in MuseScore using the `.mus
 
 - Rubato-heavy or free-time passages (intros, cadenzas) get awkward rhythms.
 - Each staff is one chord stream; a held melody note under moving inner voices is shortened.
+- Fingering is a good starting point, not a teacher: it follows a published ergonomic model and
+  gets standard scales, triads and Alberti basses right, but it does not know your hand size.
 - The meter is not detected; pass `--time-signature` for anything other than 4/4.
 - Non-piano instruments, vocals and heavy reverb reduce transcription accuracy.
 
@@ -114,7 +130,12 @@ Only transcribe music you have the right to use. Downloading from YouTube is sub
 .venv/bin/python -m pytest
 ```
 
-The tests render small ground-truth pieces (an Alberti-bass minuet, a triplet nocturne, a waltz, a
+Fingering is checked against fingerings every pianist knows: major scales in both hands
+(the right-hand thumb never lands on a black key), five-finger positions, triads, open fifths,
+spread left-hand chords and the Alberti bass.
+
+The tests also render small ground-truth pieces (an Alberti-bass minuet, a triplet nocturne, a waltz, a
 fast arpeggio ballad) as humanized performances with timing jitter, early releases and tempo drift.
-They check that onsets, triplets, hands and key come back correctly. `tests/make_test_piece.py`
+They check that onsets, triplets, hands and key come back correctly, and that the hand split
+leaves no chord wider than an octave and no crossed hands. `tests/make_test_piece.py`
 also synthesizes audio with FluidSynth for a full audio-to-PDF check.

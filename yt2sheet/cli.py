@@ -37,6 +37,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--grid", type=int, choices=[8, 16, 32], default=16, help="smallest note value (default 16th)")
     p.add_argument("--no-triplets", action="store_true", help="never use triplets")
     p.add_argument("--split-point", type=int, help="fixed hand split MIDI pitch (default: automatic)")
+    p.add_argument("--fingering", choices=["smart", "all", "none"], default="smart",
+                   help="finger numbers: at position changes (smart, default), on every note, or none")
+    p.add_argument("--reach", type=int, default=12,
+                   help="widest chord one hand plays, in semitones (default 12 = octave; 14 for large hands)")
+    p.add_argument("--keep-doublings", action="store_true",
+                   help="never drop octave-doubled notes from chords that are too wide (roll them instead)")
     p.add_argument("--downbeat", type=int, help="override which beat (0-based) of the first bar the music starts on")
     p.add_argument("--min-velocity", type=int, default=12, help="drop transcribed notes quieter than this")
     p.add_argument("--engine", choices=["auto", "lilypond", "verovio"], default="auto", help="PDF engraver")
@@ -127,11 +133,18 @@ def run(args: argparse.Namespace, log=_log) -> dict[str, Path]:
     log(f"  tempo ~{bpm:.0f} BPM, {meter}")
 
     from .hands import split_hands
+    from .playability import make_playable
     from .render import render_pdf
     from .score import build_score
 
+    log("Splitting hands and fingering ...")
     rh, lh = split_hands(qnotes, split_point=args.split_point)
-    score, key = build_score(rh, lh, meter, bpm, title, key_override=args.key, pedal=pedal_beats)
+    rh, lh, fixes = make_playable(rh, lh, reach=args.reach, drop_doublings=not args.keep_doublings)
+    if fixes.moved or fixes.dropped or fixes.rolled:
+        log(f"  playability (reach {args.reach}): {fixes.moved} notes moved to the other hand, "
+            f"{fixes.dropped} doubled notes dropped, {len(fixes.rolled)} wide chords rolled")
+    score, key = build_score(rh, lh, meter, bpm, title, key_override=args.key, pedal=pedal_beats,
+                             fingering=args.fingering, rolled=fixes.rolled)
     log(f"  key: {key.tonic.name.replace('-', 'b')} {key.mode}; RH {len(rh)} notes, LH {len(lh)} notes")
 
     outputs["musicxml"] = base.with_suffix(".musicxml")

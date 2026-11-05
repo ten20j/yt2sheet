@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 
 from .notes import QNote
 
-MAX_SPAN = 14  # semitones a hand comfortably covers (a 9th)
+COMFORT_SPAN = 12  # semitones a hand covers comfortably (an octave)
+MAX_SPAN = 14  # a 9th: a stretch for most hands
 MAX_NOTES = 5
 
 
-RECENT_BEATS = 2  # how far back a hand's recent notes inform where it is
+RECENT_BEATS = 3  # how far back a hand's recent notes inform where it is (a 3/4 bar)
 
 
 def _dist(new: list[int], center: float, recent: list[int]) -> float:
@@ -35,7 +37,7 @@ def _hand_cost(new: list[int], held: list[int], center: float, recent: list[int]
     # Physical constraint: everything this hand would be holding must fit under it.
     sounding = new + held
     span = max(sounding) - min(sounding)
-    cost += max(0, span - MAX_SPAN) * 0.5 + max(0, span - MAX_SPAN - 3) * 2.0
+    cost += max(0, span - COMFORT_SPAN) * 0.3 + max(0, span - MAX_SPAN) * 0.5 + max(0, span - MAX_SPAN - 3) * 2.0
     cost += max(0, len(sounding) - MAX_NOTES) * 1.0
     # Notation convention: RH reads treble, LH reads bass; crossing middle C is mildly penalised.
     if is_rh:
@@ -47,10 +49,60 @@ def _hand_cost(new: list[int], held: list[int], center: float, recent: list[int]
     return cost
 
 
-def split_hands(qnotes: list[QNote], split_point: int | None = None) -> tuple[list[QNote], list[QNote]]:
+BEAM = 24  # hypotheses kept by the beam search
+
+
+@dataclass(frozen=True)
+class _Hand:
+    center: float  # running register (MIDI pitch)
+    recent: tuple  # last notes played (QNote), newest last
+    active: tuple  # notes still held down (QNote)
+
+    def advance(self, start, new: list[QNote]) -> "_Hand":
+        active = tuple(q for q in self.active if q.end > start) + tuple(new)
+        recent = (self.recent + tuple(new))[-12:]
+        center = self.center
+        if new:
+            center = 0.6 * center + 0.4 * (sum(q.pitch for q in new) / len(new))
+        return _Hand(center, recent, active)
+
+
+def _separate(rh: _Hand, lh: _Hand) -> tuple[_Hand, _Hand]:
+    """Keep the two hands' registers at least a 5th apart."""
+    if rh.center - lh.center >= 7:
+        return rh, lh
+    mid = (rh.center + lh.center) / 2
+    return _Hand(mid + 3.5, rh.recent, rh.active), _Hand(mid - 3.5, lh.recent, lh.active)
+
+
+def _step_cost(ps: list[int], k: int, start, rh: _Hand, lh: _Hand) -> float:
+    """Cost of giving ps[:k] to the left hand and ps[k:] to the right hand at `start`."""
+    rh_held = [q.pitch for q in rh.active if q.end > start]
+    lh_held = [q.pitch for q in lh.active if q.end > start]
+    rh_recent = [q.pitch for q in rh.recent if q.start >= start - RECENT_BEATS]
+    lh_recent = [q.pitch for q in lh.recent if q.start >= start - RECENT_BEATS]
+    left, right = ps[:k], ps[k:]
+    cost = _hand_cost(left, lh_held, lh.center, lh_recent, is_rh=False)
+    cost += _hand_cost(right, rh_held, rh.center, rh_recent, is_rh=True)
+    if 0 < k < len(ps):  # hands rarely split a chord at a small interval
+        cost += max(0, 5 - (ps[k] - ps[k - 1])) * 0.15
+    # Crossed hands (LH sounding above the RH) are awkward unless the music demands it.
+    lh_top = max(left + lh_held, default=None)
+    rh_bottom = min(right + rh_held, default=None)
+    if lh_top is not None and rh_bottom is not None and lh_top > rh_bottom:
+        cost += 1.0 + (lh_top - rh_bottom) / 6.0
+    return cost
+
+
+def split_hands(
+    qnotes: list[QNote], split_point: int | None = None, beam: int = BEAM
+) -> tuple[list[QNote], list[QNote]]:
     """Return (right_hand, left_hand).
 
-    With `split_point` set, use a fixed split (notes >= split_point go to the RH).
+    For every onset the notes are split into a lower (LH) and upper (RH) part. A beam search
+    over the whole piece picks the sequence of splits with the lowest total cost, so an early
+    choice is judged by how playable it leaves what follows. With `split_point` set, use a
+    fixed split instead (notes >= split_point go to the RH).
     """
     if split_point is not None:
         rh = [q for q in qnotes if q.pitch >= split_point]
@@ -60,40 +112,37 @@ def split_hands(qnotes: list[QNote], split_point: int | None = None) -> tuple[li
     groups: dict = defaultdict(list)
     for q in qnotes:
         groups[q.start].append(q)
+    starts = sorted(groups)
+    ordered = [sorted(groups[s], key=lambda q: q.pitch) for s in starts]
 
-    rh_c, lh_c = 67.0, 50.0
-    rh: list[QNote] = []
-    lh: list[QNote] = []
-    rh_active: list[QNote] = []
-    lh_active: list[QNote] = []
-    for start in sorted(groups):
-        grp = sorted(groups[start], key=lambda q: q.pitch)
+    hyps = [(0.0, _Hand(67.0, (), ()), _Hand(50.0, (), ()), None)]
+    for start, grp in zip(starts, ordered):
         ps = [q.pitch for q in grp]
-        rh_active = [q for q in rh_active if q.end > start]
-        lh_active = [q for q in lh_active if q.end > start]
-        rh_held = [q.pitch for q in rh_active]
-        lh_held = [q.pitch for q in lh_active]
-        rh_recent = [q.pitch for q in rh[-12:] if q.start >= start - RECENT_BEATS]
-        lh_recent = [q.pitch for q in lh[-12:] if q.start >= start - RECENT_BEATS]
-        best_k, best_cost = 0, float("inf")
-        for k in range(len(ps) + 1):
-            cost = _hand_cost(ps[:k], lh_held, lh_c, lh_recent, is_rh=False) + _hand_cost(
-                ps[k:], rh_held, rh_c, rh_recent, is_rh=True
-            )
-            if 0 < k < len(ps):  # hands rarely split a chord at a small interval
-                cost += max(0, 5 - (ps[k] - ps[k - 1])) * 0.15
-            if cost < best_cost:
-                best_k, best_cost = k, cost
-        left, right = grp[:best_k], grp[best_k:]
-        lh.extend(left)
-        rh.extend(right)
-        lh_active.extend(left)
-        rh_active.extend(right)
-        if left:
-            lh_c = 0.6 * lh_c + 0.4 * (sum(q.pitch for q in left) / len(left))
-        if right:
-            rh_c = 0.6 * rh_c + 0.4 * (sum(q.pitch for q in right) / len(right))
-        if rh_c - lh_c < 7:  # keep the hands' registers apart
-            mid = (rh_c + lh_c) / 2
-            rh_c, lh_c = mid + 3.5, mid - 3.5
+        expanded = []
+        for cost, rh, lh, path in hyps:
+            for k in range(len(ps) + 1):
+                expanded.append((cost + _step_cost(ps, k, start, rh, lh), rh, lh, path, k))
+        expanded.sort(key=lambda h: h[0])
+        hyps, seen = [], set()
+        for cost, rh, lh, path, k in expanded:
+            nrh, nlh = _separate(rh.advance(start, grp[k:]), lh.advance(start, grp[:k]))
+            key = (round(nrh.center), round(nlh.center), tuple(q.pitch for q in nrh.active),
+                   tuple(q.pitch for q in nlh.active), tuple(q.pitch for q in nrh.recent[-2:]))
+            if key in seen:
+                continue
+            seen.add(key)
+            hyps.append((cost, nrh, nlh, (k, path)))
+            if len(hyps) >= beam:
+                break
+
+    ks = []
+    node = hyps[0][3]
+    while node is not None:
+        k, node = node
+        ks.append(k)
+    ks.reverse()
+    rh, lh = [], []
+    for grp, k in zip(ordered, ks):
+        lh.extend(grp[:k])
+        rh.extend(grp[k:])
     return rh, lh

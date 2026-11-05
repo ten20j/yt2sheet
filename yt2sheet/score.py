@@ -177,6 +177,39 @@ def _assign_clefs(part) -> None:
 # --------------------------------------------------------------------------- score
 
 
+def fingering_marks(events: list[Event], hand: str, mode: str, seconds_per_ql: float,
+                    beat_ql: Fraction) -> list[dict[int, int] | None]:
+    """Fingering to print for each event ({pitch: finger}), or None.
+
+    mode "all" prints every fingered event; "smart" only where the hand takes a new position
+    (shifts, thumb passing, wide arpeggios) or starts again after a rest, which is how
+    fingering is usually marked in printed music; "none" prints nothing.
+    """
+    from .fingering import finger_events, hand_position
+
+    out: list[dict[int, int] | None] = [None] * len(events)
+    if mode == "none":
+        return out
+    idx = [i for i, ev in enumerate(events) if ev.tie in (None, "start")]  # tied pieces are held, not struck
+    fingered = finger_events([(float(events[i].start), events[i].pitches) for i in idx], hand, seconds_per_ql)
+    by_event = dict(zip(idx, fingered))
+    prev_pos, prev_end = None, None
+    for i, ev in enumerate(events):
+        if i not in by_event:  # continuation of a tie
+            prev_end = ev.end
+            continue
+        f = by_event[i]
+        if f is None:
+            prev_pos = None
+            continue
+        pos = hand_position(f, hand)
+        rested = prev_end is not None and ev.start - prev_end >= beat_ql
+        if mode == "all" or prev_pos is None or rested or abs(pos - prev_pos) >= 2:
+            out[i] = f
+        prev_pos, prev_end = pos, ev.end
+    return out
+
+
 def build_score(
     rh_notes: list[QNote],
     lh_notes: list[QNote],
@@ -185,9 +218,13 @@ def build_score(
     title: str,
     key_override: str | None = None,
     pedal: list[tuple[float, float]] | None = None,
+    fingering: str = "smart",
+    rolled: set | None = None,
 ):
-    """`pedal`: sustain-pedal-down spans in beats (same origin as the notes)."""
+    """`pedal`: sustain-pedal-down spans in beats (same origin as the notes).
+    `fingering`: "smart", "all" or "none". `rolled`: (hand "R"/"L", start beat) of chords to arpeggiate."""
     from music21 import (
+        articulations,
         chord,
         expressions,
         clef,
@@ -237,8 +274,12 @@ def build_score(
                 ped.style.fontStyle = "italic"
                 part.insert(0, ped)
 
+        hand = name[0]
+        events = staff_events(qnotes, meter, pedal)
+        seconds_per_ql = 60.0 / bpm / float(meter.beat_ql)
+        marks = fingering_marks(events, hand, fingering, seconds_per_ql, meter.beat_ql)
         cursor = Fraction(0)
-        for ev in staff_events(qnotes, meter, pedal):
+        for ev, mark in zip(events, marks):
             if ev.start > cursor:
                 r = note.Rest()
                 r.duration = duration.Duration(ev.start - cursor)
@@ -251,6 +292,13 @@ def build_score(
             el.volume.velocity = ev.velocity
             if ev.tie:
                 el.tie = tie.Tie(ev.tie)
+            if mark:
+                for p in ev.pitches:  # ascending, matching the chord's note order
+                    fa = articulations.Fingering(mark[p])
+                    fa.placement = "above" if hand == "R" else "below"
+                    el.articulations.append(fa)
+            if rolled and len(ev.pitches) > 1 and ev.tie in (None, "start") and (hand, ev.start / meter.beat_ql) in rolled:
+                el.expressions.append(expressions.ArpeggioMark())
             part.insert(ev.start, el)
             cursor = ev.end
         if total_ql > cursor:

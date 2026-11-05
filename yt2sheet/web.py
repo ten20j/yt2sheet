@@ -68,7 +68,8 @@ def create_job():
     if title:
         argv += ["--title", title]
     for field, flag in (("time_signature", "--time-signature"), ("bpm", "--bpm"), ("start", "--start"),
-                        ("end", "--end"), ("key", "--key"), ("paper", "--paper")):
+                        ("end", "--end"), ("key", "--key"), ("paper", "--paper"),
+                        ("fingering", "--fingering"), ("reach", "--reach")):
         val = (request.form.get(field) or "").strip()
         if val:
             argv += [flag, val]
@@ -140,6 +141,8 @@ pre{white-space:pre-wrap;font:13px/1.5 ui-monospace,monospace;color:var(--muted)
       <div><label>Start (s)</label><input name="start" type="number" min="0" step="0.1"></div>
       <div><label>End (s)</label><input name="end" type="number" min="0" step="0.1"></div>
       <div><label>Paper</label><select name="paper"><option>letter</option><option>a4</option></select></div>
+      <div><label>Fingering</label><select name="fingering"><option value="smart">where the hand moves</option><option value="all">every note</option><option value="none">none</option></select></div>
+      <div><label>Hand reach</label><select name="reach"><option value="12">octave (12)</option><option value="14">9th (14)</option><option value="16">10th (16)</option><option value="10">small (10)</option></select></div>
     </div>
     <label class="check"><input type="checkbox" name="no_triplets" value="1"> Never use triplets</label>
   </details>
