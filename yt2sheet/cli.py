@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--key", help="force the key, e.g. 'C', 'a' (minor), 'E-' (E-flat major)")
     p.add_argument("--grid", type=int, choices=[8, 16, 32], default=16, help="smallest note value (default 16th)")
     p.add_argument("--no-triplets", action="store_true", help="never use triplets")
+    p.add_argument("--rhythm", choices=["simple", "detailed"], default="simple",
+                   help="simple (default): write plain rhythms, not every nuance of the timing; "
+                        "detailed: keep every 16th that was played")
+    p.add_argument("--no-grace-notes", action="store_true",
+                   help="write ornaments as ordinary notes instead of grace notes")
     p.add_argument("--split-point", type=int, help="fixed hand split MIDI pitch (default: automatic)")
     p.add_argument("--fingering", choices=["smart", "all", "none"], default="smart",
                    help="finger numbers: at position changes (smart, default), on every note, or none")
@@ -120,12 +125,19 @@ def run(args: argparse.Namespace, log=_log) -> dict[str, Path]:
     if not notes:
         raise SystemExit("No notes were detected - is this piano music?")
 
+    if not args.no_grace_notes:
+        from .ornaments import extract_graces
+
+        notes, n_graces = extract_graces(notes)
+        if n_graces:
+            log(f"  {n_graces} ornaments written as grace notes")
+
     log("Tracking beats and quantizing rhythm ...")
     beats = track_beats(notes, bpm=args.bpm)
     if not args.bpm:
         beats = choose_beat_octave(notes, beats, meter)
     bpm = tempo_bpm(beats)
-    qnotes = quantize(notes, beats, meter, smallest=args.grid, triplets=not args.no_triplets)
+    qnotes = quantize(notes, beats, meter, smallest=args.grid, triplets=not args.no_triplets, style=args.rhythm)
     qnotes, origin = align_to_barlines(qnotes, meter, shift=args.downbeat)
     pedal_beats = [
         (float(time_to_beat(a, beats)) - origin, float(time_to_beat(b, beats)) - origin) for a, b in pedal

@@ -87,7 +87,11 @@ def step_cost(f1: int, q1: int, b1: bool, f2: int, q2: int, b2: bool) -> float:
             return 0.0
         # Same finger on a new key breaks legato (Parncutt excludes it outright). Only for
         # leaps the hand cannot stretch anyway is it no worse than any other shift.
-        return JUMP_COST if abs(q2 - q1) > 12 else SAME_FINGER_COST
+        if abs(q2 - q1) <= 12:
+            return SAME_FINGER_COST
+        # A leap with the same finger: price it like a pair with no span at all, so that
+        # landing on the natural finger (thumb on G3, then 5 on C2) is clearly preferred.
+        return _soft_cap(10.0 * abs(q2 - q1))
     cost = span_cost(f1, q1, f2, q2)
     # rule 8 three-to-four, rule 9 four-on-black
     if f1 == 3 and f2 == 4:
@@ -135,6 +139,8 @@ def three_note_cost(f1: int, q1: int, f2: int, q2: int, f3: int, q3: int) -> flo
 
     Catches shapes that every consecutive pair allows but the whole figure does not
     (e.g. 3-1-2-1 on an Alberti bass, where pianists keep the hand still with 5-1-3-1)."""
+    if abs(q2 - q1) > 12 or abs(q3 - q2) > 12:
+        return 0.0  # a leap moved the whole hand in between: no shared hand position to judge
     thumb_between = f2 == 1 and min(q1, q3) < q2 < max(q1, q3)
     if f1 == f3:
         if q1 == q3:

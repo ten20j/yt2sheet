@@ -63,6 +63,8 @@ A 4-minute piece takes about 2 minutes on a 4-core CPU; with an NVIDIA GPU add `
 | `--bpm 72` | the tempo came out doubled/halved; give roughly the beat you tap along to |
 | `--start 30 --end 95` | transcribe only part of the recording (seconds) |
 | `--key E-` | override key detection (`E-` = E-flat major, `f#` = F-sharp minor) |
+| `--rhythm detailed` | write every 16th as played (default `simple`: plain rhythms, expressive timing ignored) |
+| `--no-grace-notes` | write ornaments as ordinary notes instead of small grace notes |
 | `--no-triplets` | rubato made straight rhythms come out as triplets |
 | `--grid 8` | only use 8th notes and longer (simpler, less exact) |
 | `--fingering all` | finger numbers on every note (default `smart`: where the hand moves; `none` to hide) |
@@ -89,6 +91,13 @@ with different options: `yt2sheet output/my-piece-performance.mid --time-signatu
   metrical grid that prefers simpler rhythms; each beat may switch to triplets when they clearly fit
   better. Long notes' ends snap more coarsely (key releases are imprecise), and notes released under
   the sustain pedal are written to the next note instead of with rests.
+- **Simple rhythm** (default): a note that would be written on a 16th keeps that rhythm only
+  if it has a partner a 16th away in the same register (the beat a dotted rhythm leads into,
+  the beat it follows, or a run). A lone note pushed off the beat by expressive timing is
+  written on the beat or 8th instead. Whether a beat is in triplets is still decided on the
+  timing as played.
+- **Grace notes**: a short note a step away from a longer note struck right after it is an
+  ornament, and is engraved as a small slashed grace note rather than as a 16th.
 - **Barlines**: the downbeat is placed where accented, long bass notes fall.
 - **Hands**: every onset's notes are split into a lower (LH) and upper (RH) part. A beam search
   over the whole piece picks the splits with the lowest total cost: distance from each hand's

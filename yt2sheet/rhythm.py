@@ -249,14 +249,23 @@ def _grid_points(divisions: tuple[int, ...]) -> list[tuple[Fraction, int]]:
     return pts
 
 
-LEVEL_PENALTY = 0.03  # beats of timing error we accept to use a simpler rhythm, per level
-TRIPLET_PENALTY = 0.1  # extra cost (beats) of switching a beat to triplets; tuned on tests/pieces.py
+# Cost (in beats of timing error) of writing a note at each metrical level: 0 = on the beat,
+# 1 = 8th, 2 = 16th, ... In "simple" style a note with no partner a 16th away (no run, no
+# dotted-rhythm partner on the next beat) is expensive to write as a 16th, so expressive
+# timing (rubato, a note pushed a little early) snaps to the beat or the 8th. Notes that do
+# have such a partner are snapped as played. "detailed" writes what was played everywhere.
+LEVEL_COSTS = {
+    "simple": (0.0, 0.03, 0.25, 0.5, 0.75),
+    "detailed": (0.0, 0.03, 0.06, 0.09, 0.12),
+}
+PARTNER = (0.75, 1.25)  # partner distance, in grid steps (16ths), that makes a 16th believable
+TRIPLET_PENALTY = {"simple": 0.1, "detailed": 0.1}  # extra cost of switching a beat to triplets
 
 
-def _snap(local: float, grid: Grid) -> tuple[Fraction, float]:
+def _snap(local: float, grid: Grid, costs: tuple = LEVEL_COSTS["detailed"]) -> tuple[Fraction, float]:
     best, best_cost = Fraction(0), float("inf")
     for p, level in grid.points():
-        cost = abs(local - float(p)) + LEVEL_PENALTY * level
+        cost = abs(local - float(p)) + costs[min(level, len(costs) - 1)]
         if cost < best_cost:
             best, best_cost = p, cost
     return best, best_cost
@@ -304,11 +313,18 @@ def quantize(
     meter: Meter,
     smallest: int = 16,
     triplets: bool = True,
+    style: str = "simple",
 ) -> list[QNote]:
-    """Snap notes to a metrical grid. Positions are in beats relative to the first barline."""
+    """Snap notes to a metrical grid. Positions are in beats relative to the first barline.
+
+    style "simple" favours plain rhythms over literal timing (see LEVEL_COSTS); "detailed"
+    keeps every 16th that was played.
+    """
     if not notes:
         return []
     base, alt = grids_for(meter, smallest, triplets)
+    costs, detailed = LEVEL_COSTS[style], LEVEL_COSTS["detailed"]
+    tri_penalty = TRIPLET_PENALTY[style]
 
     onsets = time_to_beat(np.array(_cluster_onsets(notes)), beats)
     ends = time_to_beat(np.array([n.end for n in notes]), beats)
@@ -320,32 +336,86 @@ def quantize(
     for i, b in enumerate(beat_of):
         by_beat[int(b)].append(i)
 
+    # In simple style a note that would be written on a 16th keeps that rhythm only if it has
+    # a partner a 16th away, towards the nearest beat and in the same register: the beat it
+    # leads into (dotted 8th + 16th), the beat it follows (16th after the beat), or a run.
+    # A lone note pushed off the beat by expressive timing has no such partner.
+    cluster_pos = sorted({round(float(x), 3) for x in onsets})
+    pitches_at: dict[float, list[int]] = defaultdict(list)
+    for i, n in enumerate(notes):
+        pitches_at[round(float(onsets[i]), 3)].append(n.pitch)
+    partnered: set[float] = set()
+    if style == "simple":
+        arr = np.array(cluster_pos)
+        step = 1.0 / base.n
+        lo_gap, hi_gap = PARTNER[0] * step, PARTNER[1] * step
+        level_of = dict(base.points())
+        for x in cluster_pos:
+            b = math.floor(x + 0.125)
+            p = _snap(x - b, base, detailed)[0]
+            if level_of.get(p, 0) < 2:
+                continue  # beat or 8th: no partner needed
+            directions = [1] if p > Fraction(1, 2) else [-1] if p < Fraction(1, 2) else [1, -1]
+            for d in directions:
+                lo, hi = np.searchsorted(arr, x + d * hi_gap if d < 0 else x + lo_gap), \
+                    np.searchsorted(arr, x - lo_gap if d < 0 else x + hi_gap, side="right")
+                if any(_same_register(pitches_at[x], pitches_at[float(y)]) for y in arr[lo:hi]):
+                    partnered.add(x)
+                    break
+
+    def cost_of(x_abs: float) -> tuple:
+        return detailed if round(x_abs, 3) in partnered else costs
+
     grid_of_beat: dict[int, Grid] = {}
+    costs_of_beat: dict[int, tuple] = {}
     for b, idxs in by_beat.items():
         locals_ = sorted({round(float(onsets[i] - b), 3) for i in idxs})
-        cost_base = sum(_snap(x, base)[1] for x in locals_)
-        grid_of_beat[b] = base
+        # Triplets or not is decided on the timing as played; simplification only applies
+        # within the chosen grid (otherwise penalising 16ths would make triplets win instead).
+        cost_base = sum(_snap(x, base, detailed)[1] for x in locals_)
+        grid_of_beat[b], costs_of_beat[b] = base, costs
         if alt is not None:
-            snapped_alt = {_snap(x, alt)[0] for x in locals_}
+            snapped_alt = {_snap(x, alt, detailed)[0] for x in locals_}
             off_beat = [p for p in snapped_alt if 0 < p < 1]
-            if len(off_beat) >= 2 or (len(off_beat) == 1 and len(locals_) >= 2):
-                cost_alt = sum(_snap(x, alt)[1] for x in locals_) + TRIPLET_PENALTY
+            enough = len(off_beat) >= 2 or (style == "detailed" and len(off_beat) == 1 and len(locals_) >= 2)
+            if enough:
+                cost_alt = sum(_snap(x, alt, detailed)[1] for x in locals_) + tri_penalty
                 if cost_alt < cost_base:
                     grid_of_beat[b] = alt
+        # Simplifying must not merge two onsets in the same register (one hand) into a chord:
+        # if it would, write this beat as played. Melody and bass a little apart may merge.
+        g = grid_of_beat[b]
+        landed: dict[Fraction, list[float]] = defaultdict(list)
+        for x in locals_:
+            landed[_snap(x, g, cost_of(b + x))[0]].append(x)
+        for xs in landed.values():
+            for x, y in zip(xs, xs[1:]):
+                if _snap(x, g, detailed)[0] != _snap(y, g, detailed)[0] and _same_register(
+                    pitches_at[round(b + x, 3)], pitches_at[round(b + y, 3)]
+                ):
+                    costs_of_beat[b] = detailed
 
     out: list[QNote] = []
     for i, n in enumerate(notes):
         b = int(beat_of[i])
         g = grid_of_beat[b]
-        start = b + _snap(float(onsets[i] - b), g)[0]
-        end = _snap_end(start, float(ends[i]), grid_of_beat, base, 3 if meter.compound else 2)
+        x_abs = float(onsets[i])
+        c = detailed if costs_of_beat[b] is detailed else cost_of(x_abs)
+        start = b + _snap(x_abs - b, g, c)[0]
+        end = _snap_end(start, float(ends[i]), grid_of_beat, base, 3 if meter.compound else 2, costs)
         if end <= start:
             end = start + Fraction(1, g.n)
-        out.append(QNote(start, end, n.pitch, n.velocity))
+        out.append(QNote(start, end, n.pitch, n.velocity, n.graces))
     return _dedupe(out)
 
 
-def _snap_end(start: Fraction, end: float, grid_of_beat: dict[int, Grid], base: Grid, sub: int) -> Fraction:
+def _same_register(a: list[int], b: list[int]) -> bool:
+    """Could one hand play both groups of notes (nearest notes within an octave)?"""
+    return bool(a) and bool(b) and min(abs(p - q) for p in a for q in b) <= 12
+
+
+def _snap_end(start: Fraction, end: float, grid_of_beat: dict[int, Grid], base: Grid, sub: int,
+              costs: tuple = LEVEL_COSTS["detailed"]) -> Fraction:
     """Quantize a note end. Key releases are imprecise and usually early, so longer notes
     snap to coarser positions with an upward bias (a held dotted half released at 2.7 beats
     should still be a dotted half)."""
@@ -357,7 +427,7 @@ def _snap_end(start: Fraction, end: float, grid_of_beat: dict[int, Grid], base: 
     if dur >= 0.75:  # nearest beat subdivision (8th or triplet 8th), biased up
         s = 3 if ge.is_triplet else sub
         return Fraction(math.floor((end + 0.1) * s + 0.5), s)
-    return be + _snap(end - be, ge)[0]
+    return be + _snap(end - be, ge, costs)[0]
 
 
 def _dedupe(qnotes: list[QNote]) -> list[QNote]:
@@ -369,8 +439,9 @@ def _dedupe(qnotes: list[QNote]) -> list[QNote]:
             prev = by_key[k]
             prev.end = max(prev.end, q.end)
             prev.velocity = max(prev.velocity, q.velocity)
+            prev.graces = prev.graces + tuple(g for g in q.graces if g not in prev.graces)
         else:
-            by_key[k] = QNote(q.start, q.end, q.pitch, q.velocity)
+            by_key[k] = QNote(q.start, q.end, q.pitch, q.velocity, q.graces)
     by_pitch: dict[int, list[QNote]] = defaultdict(list)
     for q in by_key.values():
         by_pitch[q.pitch].append(q)
@@ -406,4 +477,4 @@ def align_to_barlines(qnotes: list[QNote], meter: Meter, shift: int | None = Non
         phase = shift % bpb
     first = math.floor(min(q.start for q in qnotes))
     origin = first - ((first - phase) % bpb)
-    return [QNote(q.start - origin, q.end - origin, q.pitch, q.velocity) for q in qnotes], origin
+    return [QNote(q.start - origin, q.end - origin, q.pitch, q.velocity, q.graces) for q in qnotes], origin

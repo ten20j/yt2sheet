@@ -25,6 +25,7 @@ class Event:
     pitches: list[int]
     velocity: int
     tie: str | None = None  # 'start' | 'continue' | 'stop'
+    graces: tuple = ()  # grace-note pitches played just before this event
 
 
 # --------------------------------------------------------------------------- staff events
@@ -71,6 +72,7 @@ def staff_events(qnotes: list[QNote], meter: Meter, pedal: list[tuple[float, flo
                 end=end * meter.beat_ql,
                 pitches=sorted({q.pitch for q in grp}),
                 velocity=max(q.velocity for q in grp),
+                graces=tuple(dict.fromkeys(g for q in grp for g in q.graces)),
             )
         )
     return _split_tuplet_crossings(events, meter.beat_ql)
@@ -102,7 +104,7 @@ def _split_tuplet_crossings(events: list[Event], beat: Fraction) -> list[Event]:
             tie = None
             if len(pieces) > 1:
                 tie = "start" if j == 0 else ("stop" if j == len(pieces) - 1 else "continue")
-            out.append(Event(a, b, ev.pitches, ev.velocity, tie))
+            out.append(Event(a, b, ev.pitches, ev.velocity, tie, ev.graces if j == 0 else ()))
     return out
 
 
@@ -284,6 +286,10 @@ def build_score(
                 r = note.Rest()
                 r.duration = duration.Duration(ev.start - cursor)
                 part.insert(cursor, r)
+            for g in ev.graces:  # ornaments: small slashed grace notes before the main note
+                gn = note.Note(_pitch(g, names), type="eighth").getGrace()
+                gn.duration.slash = True  # acciaccatura: small slashed 8th
+                part.insert(ev.start, gn)
             if len(ev.pitches) == 1:
                 el = note.Note(_pitch(ev.pitches[0], names))
             else:

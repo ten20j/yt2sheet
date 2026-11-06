@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fractions import Fraction
 
 
@@ -12,6 +12,7 @@ class Note:
     end: float
     pitch: int  # MIDI pitch
     velocity: int
+    graces: tuple = field(default=())  # pitches of grace notes played just before this note
 
 
 @dataclass
@@ -22,3 +23,4 @@ class QNote:
     end: Fraction
     pitch: int
     velocity: int
+    graces: tuple = field(default=())

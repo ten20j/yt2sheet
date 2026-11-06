@@ -62,6 +62,8 @@ def render_lilypond(musicxml: Path, pdf: Path, paper: str = "letter") -> Path:
     src = re.sub(r"^\s*subtitle\s*=.*\n", "", src, flags=re.M)
     src = re.sub(r"(\\header\s*\{)", r"\1\n    tagline = ##f", src, count=1)
     src = _stack_lower_fingerings(src)
+    # musicxml2ly writes one tie per chord note ("<g e'>8 ~ ~"); LilyPond wants a single one.
+    src = re.sub(r"~(\s+~)+", "~", src)
     ly_file.write_text(src)
 
     out_base = pdf.with_suffix("")
