@@ -102,9 +102,11 @@ with different options: `yt2sheet output/my-piece-performance.mid --time-signatu
 - **Hands**: every onset's notes are split into a lower (LH) and upper (RH) part. A beam search
   over the whole piece picks the splits with the lowest total cost: distance from each hand's
   recent notes, a span limit that includes notes still held, crossed hands, splitting a
-  close chord between the hands, and the left hand taking the melody. Melody is recognised by
-  loudness relative to the surrounding two beats (pianists bring the melody out), so a melody
-  note that dips below middle C stays in the right hand.
+  close chord between the hands, the left hand taking the melody, and the right hand taking a
+  soft note out of a left-hand broken chord (so a figure stays in one hand instead of the hands
+  alternating). Melody is recognised by loudness relative to the surrounding two beats
+  (pianists bring the melody out), so a melody note that dips below middle C stays in the
+  right hand while the accompaniment around it stays in the left.
 - **Playability**: a chord one hand cannot reach (`--reach`, default an octave) gives a note to the
   other hand if it fits there, else drops an octave doubling (never the melody or bass note), else
   is marked as rolled. A hand never gets more than five notes at once.

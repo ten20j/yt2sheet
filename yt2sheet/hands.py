@@ -53,12 +53,14 @@ def _hand_cost(new: list[int], held: list[int], center: float, recent: list[int]
 
 
 BEAM = 24  # hypotheses kept by the beam search
-MELODY_WEIGHT = 1.0  # cost of the left hand taking a note that sounds like the melody
+MELODY_WEIGHT = 2.0  # cost of the left hand taking a note that sounds like the melody
 MELODY_WINDOW = 2.0  # beats either side used to judge how loud "loud" is
+HOCKET_WEIGHT = 1.5  # cost of the right hand taking a soft note out of a left-hand figure
+FIGURE_GAP = 1.0  # beats: the left hand is "in a figure" if it played within this long ago
 
 
-def melody_likelihood(qnotes: list[QNote]) -> dict[Fraction, float]:
-    """For each onset, how much its top note sounds like melody (0..1).
+def note_melody_likelihood(qnotes: list[QNote]) -> dict[int, float]:
+    """For each note (keyed by id), how much it sounds like melody (0..1).
 
     Pianists bring out the melody: it is played louder than the accompaniment around it.
     Loudness is judged against the notes within MELODY_WINDOW beats, so a quiet passage's
@@ -69,19 +71,28 @@ def melody_likelihood(qnotes: list[QNote]) -> dict[Fraction, float]:
     starts = np.array([float(q.start) for q in qnotes])
     vel = np.array([q.velocity for q in qnotes], dtype=float)
     order = np.argsort(starts)
-    starts, vel = starts[order], vel[order]
+    s_sorted, v_sorted = starts[order], vel[order]
+    out = {}
+    for q in qnotes:
+        lo = np.searchsorted(s_sorted, float(q.start) - MELODY_WINDOW)
+        hi = np.searchsorted(s_sorted, float(q.start) + MELODY_WINDOW, side="right")
+        around = v_sorted[lo:hi]
+        accomp, melody = np.percentile(around, 35), np.percentile(around, 90)
+        loud = float(np.clip((q.velocity - accomp) / max(melody - accomp, 8.0), 0.0, 1.0))
+        # a lone bass note in a quiet spot is loud for its surroundings but is not melody
+        register = float(np.clip((q.pitch - 48) / 7.0, 0.0, 1.0))  # 0 at C3 and below, 1 from G3
+        out[id(q)] = loud * register
+    return out
+
+
+def melody_likelihood(qnotes: list[QNote]) -> dict[Fraction, float]:
+    """For each onset, the melody likelihood of its top note."""
+    per_note = note_melody_likelihood(qnotes)
     tops: dict[Fraction, QNote] = {}
     for q in qnotes:
         if q.start not in tops or q.pitch > tops[q.start].pitch:
             tops[q.start] = q
-    out = {}
-    for start, q in tops.items():
-        lo = np.searchsorted(starts, float(start) - MELODY_WINDOW)
-        hi = np.searchsorted(starts, float(start) + MELODY_WINDOW, side="right")
-        around = vel[lo:hi]
-        accomp, melody = np.percentile(around, 35), np.percentile(around, 90)
-        out[start] = float(np.clip((q.velocity - accomp) / max(melody - accomp, 8.0), 0.0, 1.0))
-    return out
+    return {start: per_note[id(q)] for start, q in tops.items()}
 
 
 @dataclass(frozen=True)
@@ -107,10 +118,13 @@ def _separate(rh: _Hand, lh: _Hand) -> tuple[_Hand, _Hand]:
     return _Hand(mid + 3.5, rh.recent, rh.active), _Hand(mid - 3.5, lh.recent, lh.active)
 
 
-def _step_cost(ps: list[int], k: int, start, rh: _Hand, lh: _Hand, melody: float = 0.0) -> float:
+def _step_cost(ps: list[int], k: int, start, rh: _Hand, lh: _Hand, mus: list[float] | None = None) -> float:
     """Cost of giving ps[:k] to the left hand and ps[k:] to the right hand at `start`.
 
-    `melody` is how much the top note sounds like melody; the LH taking it costs extra."""
+    `mus` are the notes' melody likelihoods (aligned with ps): the LH taking the melody costs
+    extra, and so does the RH taking a soft note out of the middle of a LH figure (the hands
+    would alternate within one broken chord)."""
+    mus = mus or [0.0] * len(ps)
     rh_held = [q.pitch for q in rh.active if q.end > start]
     lh_held = [q.pitch for q in lh.active if q.end > start]
     rh_recent = [q.pitch for q in rh.recent if q.start >= start - RECENT_BEATS]
@@ -126,7 +140,17 @@ def _step_cost(ps: list[int], k: int, start, rh: _Hand, lh: _Hand, melody: float
     if lh_top is not None and rh_bottom is not None and lh_top > rh_bottom:
         cost += 1.0 + (lh_top - rh_bottom) / 6.0
     if k == len(ps):  # the left hand takes the top note too
-        cost += MELODY_WEIGHT * melody
+        cost += MELODY_WEIGHT * mus[-1]
+    if k < len(ps) and lh.recent:
+        # The LH is in a figure if it played within FIGURE_GAP beats, whatever the melody did
+        # meanwhile (the melody is a separate voice; the figure goes on underneath it).
+        lh_last = max(q.start for q in lh.recent)
+        if start - lh_last <= FIGURE_GAP:
+            # the figure is everything the LH played lately (an oom-pah's chords as well as its bass)
+            figure = [q.pitch for q in lh.recent if q.start >= start - 2 * FIGURE_GAP]
+            for p, mu in zip(right, mus[k:]):
+                if min(abs(p - f) for f in figure) <= 9:
+                    cost += HOCKET_WEIGHT * (1.0 - mu)
     return cost
 
 
@@ -151,14 +175,15 @@ def split_hands(
     starts = sorted(groups)
     ordered = [sorted(groups[s], key=lambda q: q.pitch) for s in starts]
 
-    mel = melody_likelihood(qnotes)
+    mel = note_melody_likelihood(qnotes)
     hyps = [(0.0, _Hand(67.0, (), ()), _Hand(50.0, (), ()), None)]
     for start, grp in zip(starts, ordered):
         ps = [q.pitch for q in grp]
+        mus = [mel[id(q)] for q in grp]
         expanded = []
         for cost, rh, lh, path in hyps:
             for k in range(len(ps) + 1):
-                expanded.append((cost + _step_cost(ps, k, start, rh, lh, mel.get(start, 0.0)), rh, lh, path, k))
+                expanded.append((cost + _step_cost(ps, k, start, rh, lh, mus), rh, lh, path, k))
         expanded.sort(key=lambda h: h[0])
         hyps, seen = [], set()
         for cost, rh, lh, path, k in expanded:

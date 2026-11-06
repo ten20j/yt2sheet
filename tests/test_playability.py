@@ -81,3 +81,30 @@ def test_melody_dip_test_detects_the_old_behaviour(monkeypatch):
     monkeypatch.setattr(hands, "MELODY_WEIGHT", 0.0)
     rh, lh = split_hands(melody_dip_piece())
     assert any(n.velocity == 62 for n in lh)  # without the melody cue, the G3s go to the LH
+
+
+def broken_chord_under_melody():
+    """LH broken chords (soft 8ths, climbing to D4) that keep going while a louder RH
+    melody plays now and then in the same register (bars 19-20 of the user's piece)."""
+    notes = []
+    for bar in range(4):
+        o = bar * 4
+        for t, p in enumerate((36, 43, 52, 55, 55, 62, 55, 48)):  # C2 G2 E3 G3 G3 D4 G3 C3
+            notes.append(QNote(F(o) + F(t, 2), F(o) + F(t + 1, 2), p, 33))
+        for t, p in ((0, 71), (1.5, 64), (3, 67), (3.5, 69)):  # melody B4 E4 G4 A4
+            notes.append(QNote(F(o) + F(t), F(o) + F(t) + F(1, 2), p, 58))
+    return notes
+
+
+def test_left_hand_keeps_its_broken_chord_instead_of_alternating_hands():
+    rh, lh = split_hands(broken_chord_under_melody())
+    assert all(n.velocity == 58 for n in rh)  # only the melody in the RH
+    assert all(n.velocity == 33 for n in lh)
+
+
+def test_broken_chord_test_detects_the_old_behaviour(monkeypatch):
+    import yt2sheet.hands as hands
+
+    monkeypatch.setattr(hands, "HOCKET_WEIGHT", 0.0)
+    rh, lh = split_hands(broken_chord_under_melody())
+    assert any(n.velocity == 33 for n in rh)  # without the cost, the RH steals figure notes
