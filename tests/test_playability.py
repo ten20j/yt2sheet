@@ -55,3 +55,29 @@ def test_split_is_playable(name):
     r = report(rh, lh)
     assert r["RH chords wider than reach"] == r["LH chords wider than reach"] == 0
     assert r["hand crossings"] == 0
+
+
+def melody_dip_piece():
+    """LH broken chords (soft) under a louder melody that dips to G3, alone on its beat,
+    right after the LH played F#3 a semitone below it (bar 9 of the user's piece)."""
+    notes = []
+    for bar in range(4):
+        o = bar * 4
+        for t, p in ((0, 43), (0.5, 50), (1, 54), (2, 43), (2.5, 50), (3, 54)):
+            notes.append(QNote(F(o) + F(t), F(o) + F(t) + F(1, 2), p, 34))
+        for t, p, d in ((0, 62, 1), (1.5, 55, 0.5), (2, 59, 1), (3.5, 60, 0.5)):
+            notes.append(QNote(F(o) + F(t), F(o) + F(t) + F(d), p, 62))
+    return notes
+
+
+def test_melody_stays_in_the_right_hand_when_it_dips_low():
+    rh, lh = split_hands(melody_dip_piece())
+    assert all(n.velocity == 62 for n in rh) and all(n.velocity == 34 for n in lh)
+
+
+def test_melody_dip_test_detects_the_old_behaviour(monkeypatch):
+    import yt2sheet.hands as hands
+
+    monkeypatch.setattr(hands, "MELODY_WEIGHT", 0.0)
+    rh, lh = split_hands(melody_dip_piece())
+    assert any(n.velocity == 62 for n in lh)  # without the melody cue, the G3s go to the LH
