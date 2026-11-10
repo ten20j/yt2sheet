@@ -48,7 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="widest chord one hand plays, in semitones (default 12 = octave; 14 for large hands)")
     p.add_argument("--keep-doublings", action="store_true",
                    help="never drop octave-doubled notes from chords that are too wide (roll them instead)")
-    p.add_argument("--downbeat", type=int, help="override which beat (0-based) of the first bar the music starts on")
+    p.add_argument("--downbeat", type=int, help="shift the barlines by this many beats")
+    p.add_argument("--strict-meter", action="store_true",
+                   help="keep the beat grid exactly as tracked (no re-alignment at phrase endings)")
     p.add_argument("--min-velocity", type=int, default=12, help="drop transcribed notes quieter than this")
     p.add_argument("--engine", choices=["auto", "lilypond", "verovio"], default="auto", help="PDF engraver")
     p.add_argument("--paper", choices=["letter", "a4"], default="letter")
@@ -61,15 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
 def run(args: argparse.Namespace, log=_log) -> dict[str, Path]:
     """Run the full pipeline. `log` receives progress messages."""
     from .download import download_audio, is_url
-    from .rhythm import (
-        Meter,
-        align_to_barlines,
-        choose_beat_octave,
-        quantize,
-        tempo_bpm,
-        time_to_beat,
-        track_beats,
-    )
+    from .meter import metric_grid
+    from .rhythm import Meter, quantize, trim_leading_bars
 
     meter = Meter.parse(args.time_signature)
     out_dir = Path(args.out_dir)
@@ -133,16 +128,14 @@ def run(args: argparse.Namespace, log=_log) -> dict[str, Path]:
             log(f"  {n_graces} ornaments written as grace notes")
 
     log("Tracking beats and quantizing rhythm ...")
-    beats = track_beats(notes, bpm=args.bpm)
-    if not args.bpm:
-        beats = choose_beat_octave(notes, beats, meter)
-    bpm = tempo_bpm(beats)
-    qnotes = quantize(notes, beats, meter, smallest=args.grid, triplets=not args.no_triplets, style=args.rhythm)
-    qnotes, origin = align_to_barlines(qnotes, meter, shift=args.downbeat)
-    pedal_beats = [
-        (float(time_to_beat(a, beats)) - origin, float(time_to_beat(b, beats)) - origin) for a, b in pedal
-    ]
+    grid = metric_grid(notes, meter, pedal, bpm=args.bpm, elastic=not args.strict_meter)
+    bpm = grid.bpm
+    qnotes = quantize(notes, grid, meter, smallest=args.grid, triplets=not args.no_triplets, style=args.rhythm)
+    qnotes, origin = trim_leading_bars(qnotes, meter, shift=args.downbeat or 0)
+    pedal_beats = [(float(grid.beat_position(a)) - origin, float(grid.beat_position(b)) - origin) for a, b in pedal]
     log(f"  tempo ~{bpm:.0f} BPM, {meter}")
+    if grid.edits:
+        log(f"  meter re-aligned at {len(grid.edits)} phrase endings (rubato)")
 
     from .hands import split_hands
     from .playability import make_playable

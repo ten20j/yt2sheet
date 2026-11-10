@@ -7,7 +7,8 @@ import numpy as np
 from yt2sheet.fingering import finger_events
 from yt2sheet.notes import Note
 from yt2sheet.ornaments import extract_graces
-from yt2sheet.rhythm import Meter, align_to_barlines, quantize, track_beats
+from yt2sheet.meter import metric_grid
+from yt2sheet.rhythm import Meter, quantize, trim_leading_bars
 
 from pieces import PIECES, perform
 
@@ -32,7 +33,7 @@ def test_rubato_snaps_to_simple_rhythms_in_simple_style():
 
 def test_cleanly_played_dotted_rhythm_survives_simple_style():
     notes = perform(PIECES["minuet"], seed=0)
-    q, _ = align_to_barlines(quantize(notes, track_beats(notes), METER, style="simple"), METER)
+    q, _ = trim_leading_bars(quantize(notes, metric_grid(notes, METER), METER, style="simple"), METER)
     # bar 7: F#5 dotted 8th, E5 16th (beat 2 + 3/4 of a beat, counting from 0)
     assert any(n.pitch == 76 and n.start == 24 + 2 + 0.75 for n in q)
 

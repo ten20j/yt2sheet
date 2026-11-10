@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 from collections import defaultdict
 from dataclasses import dataclass
 from fractions import Fraction
@@ -43,10 +44,15 @@ def _hand_cost(new: list[int], held: list[int], center: float, recent: list[int]
     cost += max(0, span - COMFORT_SPAN) * 0.3 + max(0, span - MAX_SPAN) * 0.5 + max(0, span - MAX_SPAN - 3) * 2.0
     cost += max(0, len(sounding) - MAX_NOTES) * 1.0
     # Notation convention: RH reads treble, LH reads bass; crossing middle C is mildly penalised.
+    # Each hand has its side of the keyboard (and its staff): the right hand does not go deep
+    # into the bass nor the left high into the treble. The limits follow the hand when the
+    # whole texture moves (a coda with both hands above middle C).
     if is_rh:
-        cost += sum(max(0, 55 - p) for p in new) / 12.0 * 0.5
+        floor = min(55.0, center - 3.0)
+        cost += sum(max(0.0, floor - p) for p in new) / 12.0 * RH_BASS
     else:
-        cost += sum(max(0, p - 64) for p in new) / 12.0 * 0.5
+        ceiling = max(60.0, center + 9.0)
+        cost += sum(max(0.0, p - ceiling) for p in new) / 12.0 * LH_TREBLE
     if held:  # mild preference for giving new notes to the hand that is free
         cost += 0.1
     return cost
@@ -56,6 +62,11 @@ BEAM = 24  # hypotheses kept by the beam search
 MELODY_WEIGHT = 2.0  # cost of the left hand taking a note that sounds like the melody
 MELODY_WINDOW = 2.0  # beats either side used to judge how loud "loud" is
 HOCKET_WEIGHT = 1.5  # cost of the right hand taking a soft note out of a left-hand figure
+RH_BASS = 1.5  # cost per octave of the right hand playing below G3 (or far below its own register)
+LH_TREBLE = 1.0  # cost per octave of the left hand playing above middle C (or far above its register)
+SAME_KEY = 1.0  # cost of one hand striking a key that the other hand's latest notes just played
+NO_MELODY = 0.6  # share of that cost when the right hand has no melody to carry at all
+ACCOMP_WEIGHT = 1.0  # cost of the right hand taking a soft note an octave or more below its melody
 FIGURE_GAP = 1.0  # beats: the left hand is "in a figure" if it played within this long ago
 
 
@@ -82,6 +93,39 @@ def note_melody_likelihood(qnotes: list[QNote]) -> dict[int, float]:
         # a lone bass note in a quiet spot is loud for its surroundings but is not melody
         register = float(np.clip((q.pitch - 48) / 7.0, 0.0, 1.0))  # 0 at C3 and below, 1 from G3
         out[id(q)] = loud * register
+
+    # A melody is a line. A soft top note that continues it by step, between two melody notes,
+    # is still melody (not every melody note is played out)...
+    tops: dict[Fraction, QNote] = {}
+    for q in qnotes:
+        if q.start not in tops or q.pitch > tops[q.start].pitch:
+            tops[q.start] = q
+    ordered = sorted(tops.values(), key=lambda t: t.start)
+    loud = [t for t in ordered if out[id(t)] >= 0.5]
+    loud_starts = [float(t.start) for t in loud]
+    for t in ordered:
+        if out[id(t)] >= 0.5 or not loud:
+            continue
+        i = bisect.bisect_left(loud_starts, float(t.start))
+        before = loud[i - 1] if i > 0 else None
+        after = loud[i] if i < len(loud) else None
+        if (before is not None and after is not None
+                and t.start - before.start <= MELODY_WINDOW and after.start - t.start <= MELODY_WINDOW
+                and abs(t.pitch - before.pitch) <= 4 and abs(t.pitch - after.pitch) <= 4):
+            out[id(t)] = max(out[id(t)], 0.6)
+
+    # ...and a loud note more than an octave below the loud top notes around it is an accent
+    # in the accompaniment, not a melody note two octaves down.
+    line = [(float(t.start), float(t.end), t.pitch) for t in tops.values() if out[id(t)] >= 0.5]
+    if line:
+        line_s, line_e, line_p = (np.array(x) for x in zip(*line))
+        for q in qnotes:
+            t = float(q.start)
+            # melody notes sounding, or struck, within the window around this note
+            near = (line_s <= t + MELODY_WINDOW) & (line_e >= t - MELODY_WINDOW)
+            if near.any():
+                below = float(line_p[near].max()) - q.pitch
+                out[id(q)] *= float(np.clip(1.0 - (below - 12.0) / 12.0, 0.0, 1.0))
     return out
 
 
@@ -118,12 +162,23 @@ def _separate(rh: _Hand, lh: _Hand) -> tuple[_Hand, _Hand]:
     return _Hand(mid + 3.5, rh.recent, rh.active), _Hand(mid - 3.5, lh.recent, lh.active)
 
 
-def _step_cost(ps: list[int], k: int, start, rh: _Hand, lh: _Hand, mus: list[float] | None = None) -> float:
+def _latest_keys(hand: _Hand, start) -> set[int]:
+    """The keys of the hand's most recent chord or note, if it was within the last two beats."""
+    if not hand.recent:
+        return set()
+    last = max(q.start for q in hand.recent)
+    return {q.pitch for q in hand.recent if q.start == last} if last >= start - 2 else set()
+
+
+def _step_cost(ps: list[int], k: int, start, rh: _Hand, lh: _Hand, mus: list[float] | None = None,
+               mu_of: dict | None = None) -> float:
     """Cost of giving ps[:k] to the left hand and ps[k:] to the right hand at `start`.
 
-    `mus` are the notes' melody likelihoods (aligned with ps): the LH taking the melody costs
-    extra, and so does the RH taking a soft note out of the middle of a LH figure (the hands
-    would alternate within one broken chord)."""
+    `mus` are the notes' melody likelihoods (aligned with ps; `mu_of` maps id(note) to it for
+    earlier notes). The texture this encodes: the right hand carries the melody and the notes
+    close under it, the left hand the accompaniment. So the LH taking the melody costs extra;
+    so does the RH taking a soft note far below its melody, or out of the middle of a LH
+    figure (the hands would alternate within one broken chord)."""
     mus = mus or [0.0] * len(ps)
     rh_held = [q.pitch for q in rh.active if q.end > start]
     lh_held = [q.pitch for q in lh.active if q.end > start]
@@ -139,8 +194,26 @@ def _step_cost(ps: list[int], k: int, start, rh: _Hand, lh: _Hand, mus: list[flo
     rh_bottom = min(right + rh_held, default=None)
     if lh_top is not None and rh_bottom is not None and lh_top > rh_bottom:
         cost += 1.0 + (lh_top - rh_bottom) / 6.0
+    # A repeated note belongs to the hand that just played it (its latest notes, if recent).
+    rh_keys = _latest_keys(rh, start)
+    lh_keys = _latest_keys(lh, start)
+    cost += SAME_KEY * sum(1 for p in left if p in rh_keys and p not in lh_keys)
+    cost += SAME_KEY * sum(1 for p in right if p in lh_keys and p not in rh_keys)
     if k == len(ps):  # the left hand takes the top note too
         cost += MELODY_WEIGHT * mus[-1]
+    if k < len(ps) and mu_of is not None:
+        # The melody note the RH is carrying: a loud note now, else its latest one in two beats.
+        carried = [p for p, mu in zip(right, mus[k:]) if mu >= 0.5]
+        if not carried:
+            lately = [q for q in rh.recent if q.start >= start - 2 and mu_of.get(id(q), 0.0) >= 0.5]
+            carried = [max(lately, key=lambda q: (q.start, q.pitch)).pitch] if lately else []
+        if carried:
+            melody = max(carried)
+            for p, mu in zip(right, mus[k:]):
+                far = min(max((melody - p - 4) / 8.0, 0.0), 1.0)  # 0 within a 4th, 1 from an octave
+                cost += ACCOMP_WEIGHT * (1.0 - mu) * far
+        else:  # nothing to sing: accompaniment is the left hand's job when it can reach
+            cost += ACCOMP_WEIGHT * NO_MELODY * sum(1.0 - mu for mu in mus[k:])
     if k < len(ps) and lh.recent:
         # The LH is in a figure if it played within FIGURE_GAP beats, whatever the melody did
         # meanwhile (the melody is a separate voice; the figure goes on underneath it).
@@ -183,7 +256,7 @@ def split_hands(
         expanded = []
         for cost, rh, lh, path in hyps:
             for k in range(len(ps) + 1):
-                expanded.append((cost + _step_cost(ps, k, start, rh, lh, mus), rh, lh, path, k))
+                expanded.append((cost + _step_cost(ps, k, start, rh, lh, mus, mel), rh, lh, path, k))
         expanded.sort(key=lambda h: h[0])
         hyps, seen = [], set()
         for cost, rh, lh, path, k in expanded:

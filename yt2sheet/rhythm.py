@@ -180,39 +180,12 @@ def refine_beat_level(notes: list[Note], beats: np.ndarray) -> tuple[np.ndarray,
     return new, best_f
 
 
-def choose_beat_octave(notes: list[Note], beats: np.ndarray, meter: "Meter") -> np.ndarray:
-    """Notate continuous fast motion as 8ths at half tempo instead of quarters.
-
-    If almost every onset lands on a beat at a fast tempo, the tracker has probably
-    taken the 8th-note pulse as the beat (common for flowing arpeggio accompaniments).
-    Only applied in simple meters with an even number of beats per bar, so a 3/4 waltz
-    at quarter = 140 is left alone.
-    """
-    if meter.compound or meter.beats_per_bar % 2 or tempo_bpm(beats) <= 110:
-        return beats
-    starts = {q.start for q in quantize(notes, beats, meter)}
-    offbeat = sum(s.denominator != 1 for s in starts) / max(1, len(starts))
-    if offbeat >= 0.10:
-        return beats
-    # keep the half-tempo grid whose beats carry the stronger (accented, low) onsets
-    pos = time_to_beat(np.array([n.start for n in notes]), beats)
-    w = accent_weights(pos, [n.pitch for n in notes], [n.velocity for n in notes], 2.0)
-    on_beat = np.abs(pos - np.round(pos)) < 0.15
-    even = float(np.sum(w[on_beat & (np.round(pos) % 2 == 0)]))
-    odd = float(np.sum(w[on_beat & (np.round(pos) % 2 == 1)]))
-    return beats[0::2] if even >= odd else beats[1::2]
-
-
 def time_to_beat(t: np.ndarray | float, beats: np.ndarray) -> np.ndarray:
     """Piecewise-linear map from seconds to (fractional) beat index."""
     t = np.asarray(t, dtype=float)
     idx = np.clip(np.searchsorted(beats, t), 1, len(beats) - 1)
     b0, b1 = beats[idx - 1], beats[idx]
     return (idx - 1) + (t - b0) / (b1 - b0)
-
-
-def tempo_bpm(beats: np.ndarray) -> float:
-    return 60.0 / float(np.median(np.diff(beats)))
 
 
 # --------------------------------------------------------------------------- grids
@@ -290,19 +263,34 @@ def grids_for(meter: Meter, smallest: int, triplets: bool) -> tuple[Grid, Grid |
 # --------------------------------------------------------------------------- quantization
 
 
-def _cluster_onsets(notes: list[Note], window: float = 0.035) -> list[float]:
-    """Make near-simultaneous onsets (chords, slight rolls) share one onset time."""
+def _cluster_onsets(notes: list[Note], window: float = 0.035, spread: float = 0.11) -> list[float]:
+    """Make near-simultaneous onsets share one onset time.
+
+    Notes within `window` seconds are a chord. Notes an octave or more apart may be up to
+    `spread` seconds apart and still be one event: in expressive playing the hands are
+    rarely together (the bass leads, the melody lags), while quick notes in one register
+    (runs, rolls) stay separate.
+    """
     onsets = [n.start for n in notes]
     order = sorted(range(len(notes)), key=lambda i: onsets[i])
     out = list(onsets)
     i = 0
     while i < len(order):
+        first = onsets[order[i]]
+        members = [order[i]]
         j = i
-        while j + 1 < len(order) and onsets[order[j + 1]] - onsets[order[i]] <= window:
-            j += 1
-        mean = float(np.mean([onsets[order[k]] for k in range(i, j + 1)]))
-        for k in range(i, j + 1):
-            out[order[k]] = mean
+        while j + 1 < len(order):
+            k = order[j + 1]
+            gap = onsets[k] - first
+            far = min(abs(notes[k].pitch - notes[m].pitch) for m in members) >= 12
+            if gap <= window or (gap <= spread and far):
+                members.append(k)
+                j += 1
+            else:
+                break
+        mean = float(np.mean([onsets[k] for k in members]))
+        for k in members:
+            out[k] = mean
         i = j + 1
     return out
 
@@ -326,8 +314,10 @@ def quantize(
     costs, detailed = LEVEL_COSTS[style], LEVEL_COSTS["detailed"]
     tri_penalty = TRIPLET_PENALTY[style]
 
-    onsets = time_to_beat(np.array(_cluster_onsets(notes)), beats)
-    ends = time_to_beat(np.array([n.end for n in notes]), beats)
+    # `beats` is an array of beat times, or a meter.MetricGrid (which also knows the barlines)
+    to_beats = beats.beat_position if hasattr(beats, "beat_position") else (lambda t: time_to_beat(t, beats))
+    onsets = to_beats(np.array(_cluster_onsets(notes)))
+    ends = to_beats(np.array([n.end for n in notes]))
 
     # Assign onsets to beats (with a little look-behind tolerance) and choose a grid per beat.
     tol = 0.125
@@ -456,25 +446,11 @@ def _dedupe(qnotes: list[QNote]) -> list[QNote]:
     return out
 
 
-def align_to_barlines(qnotes: list[QNote], meter: Meter, shift: int | None = None) -> tuple[list[QNote], int]:
-    """Choose which beats are downbeats and shift so the first bar starts at position 0.
-
-    The downbeat phase maximises accented, long and low (bass) onsets on beat 1.
-    Returns (shifted notes, origin) where origin is the beat index that became 0.
-    """
+def trim_leading_bars(qnotes: list[QNote], meter: Meter, shift: int = 0) -> tuple[list[QNote], int]:
+    """For notes whose positions already have barlines at multiples of the bar length (from a
+    meter.MetricGrid): drop empty bars before the first note. `shift` moves the barlines by
+    that many beats. Returns (notes, origin) where origin is the beat that became 0."""
     bpb = meter.beats_per_bar
-    if shift is None:
-        strength: dict[int, float] = defaultdict(float)
-        acc = accent_weights([float(q.start) for q in qnotes], [q.pitch for q in qnotes],
-                             [q.velocity for q in qnotes], bpb / 2)
-        for q, a in zip(qnotes, acc):
-            if q.start.denominator == 1:
-                dur = min(float(q.end - q.start), 4.0)
-                strength[int(q.start)] += a * (1.0 + 0.5 * dur)
-        scores = [sum(v for b, v in strength.items() if b % bpb == s) for s in range(bpb)]
-        phase = int(np.argmax(scores))
-    else:
-        phase = shift % bpb
     first = math.floor(min(q.start for q in qnotes))
-    origin = first - ((first - phase) % bpb)
+    origin = first - ((first - shift) % bpb)
     return [QNote(q.start - origin, q.end - origin, q.pitch, q.velocity, q.graces) for q in qnotes], origin

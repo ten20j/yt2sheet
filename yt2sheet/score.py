@@ -40,32 +40,71 @@ def _pedal_release(pos: Fraction, pedal: list[tuple[float, float]]) -> Fraction 
     return None
 
 
-def staff_events(qnotes: list[QNote], meter: Meter, pedal: list[tuple[float, float]] | None = None) -> list[Event]:
+def _is_plain(beats: Fraction, meter: Meter) -> bool:
+    """Can this many beats be written as one note (plain or single-dotted)?"""
+    ql = beats * meter.beat_ql
+    for base in (Fraction(1, 4), Fraction(1, 2), Fraction(1), Fraction(2), Fraction(4)):
+        if ql in (base, base * 3 / 2):
+            return True
+    return False
+
+
+def _plain_end(start: Fraction, end: Fraction, at_least: Fraction, meter: Meter) -> Fraction:
+    """The latest end not after `end` (and not before `at_least`) that makes one plain note
+    ending on a beat, the half bar or the barline; `end` itself if there is none."""
+    if _is_plain(end - start, meter):
+        return end
+    bar = Fraction(meter.beats_per_bar)
+    bar_start = (start // bar) * bar
+    marks = {bar_start + b for b in range(1, meter.beats_per_bar + 1)}
+    if meter.beats_per_bar % 2 == 0:
+        marks.add(bar_start + bar / 2)
+    for m in sorted(marks, reverse=True):
+        if at_least <= m <= end and m > start and _is_plain(m - start, meter):
+            return m
+    return end
+
+
+def staff_events(qnotes: list[QNote], meter: Meter, pedal: list[tuple[float, float]] | None = None,
+                 melody: bool = True) -> list[Event]:
     """Collapse one hand's notes into a single chord stream (onset -> chord).
 
     `pedal` are sustain-pedal-down spans in beats; a note released under the pedal keeps
     sounding, so it is notated up to the next onset (or pedal lift) rather than with a rest.
+    In a melody staff that may tie it over the barline (the line is still singing). In an
+    accompaniment staff (`melody=False`) a note only the pedal sustains stays inside its
+    bar and gets a plain length, with rests after it: a tie would claim a finger holds it.
     """
     pedal = pedal or []
     groups: dict[Fraction, list[QNote]] = defaultdict(list)
     for q in qnotes:
         groups[q.start].append(q)
     starts = sorted(groups)
+    bar = Fraction(meter.beats_per_bar)
     events: list[Event] = []
     for i, s in enumerate(starts):
         grp = groups[s]
-        end = max(q.end for q in grp)
+        held = max(q.end for q in grp)  # where the keys were released
+        barline = (s // bar + 1) * bar
+        # Accompaniment that only the pedal sustains is written inside its bar. Notes whose key
+        # is held across the barline keep their tie.
+        nxt = starts[i + 1] if i + 1 < len(starts) else None
+        in_bar = not melody and nxt is not None and held <= barline  # the last note may ring on
+        limit = barline if in_bar else None
+        end = held
         lift = _pedal_release(end, pedal)
         if lift is not None and lift > end:
-            end = lift
-        if i + 1 < len(starts):
-            nxt = starts[i + 1]
+            end = lift if limit is None else min(lift, limit)
+        if nxt is not None:
             end = min(max(end, s + MIN_SHOWN), nxt)
             gap = nxt - end
-            if 0 < gap <= LEGATO_FILL and gap <= end - s:
+            if 0 < gap <= LEGATO_FILL and gap <= end - s and (limit is None or nxt <= limit):
                 end = nxt
         else:
             end = max(end, s + MIN_SHOWN)
+        if limit is not None and end > held and (nxt is None or end < nxt or end == limit):
+            # the pedal chose this length, so choose a plain one: no double dots or ties
+            end = _plain_end(s, end, max(held, s + MIN_SHOWN), meter)
         events.append(
             Event(
                 start=s * meter.beat_ql,
@@ -179,19 +218,72 @@ def _assign_clefs(part) -> None:
 # --------------------------------------------------------------------------- score
 
 
+REMIND_AFTER = 8  # bars before a hand move that was already marked gets its fingering printed again
+
+
+def _same_position(prev: dict[int, int], cur: dict[int, int], hand: str) -> bool:
+    """Can the hand play `cur` right after `prev` without shifting or crossing: every pair of
+    fingers within its comfortable span, no finger passing the thumb, no finger changing key?"""
+    from .fingering import SPANS
+
+    sign = -1 if hand == "L" else 1
+    for pa, fa in prev.items():
+        for pb, fb in cur.items():
+            if fa == fb:
+                if pa != pb:
+                    return False
+                continue
+            lo_f, lo_q, hi_f, hi_q = (fa, sign * pa, fb, sign * pb) if fa < fb else (fb, sign * pb, fa, sign * pa)
+            _, min_comf, _, _, max_comf, _ = SPANS[(lo_f, hi_f)]
+            d = hi_q - lo_q
+            if d < max(min_comf, 0) or d > max_comf:
+                return False
+    return True
+
+
 def fingering_marks(events: list[Event], hand: str, mode: str, seconds_per_ql: float,
-                    beat_ql: Fraction) -> list[dict[int, int] | None]:
+                    beat_ql: Fraction, bar_ql: Fraction = Fraction(4)) -> list[dict[int, int] | None]:
     """Fingering to print for each event ({pitch: finger}), or None.
 
-    mode "all" prints every fingered event; "smart" only where the hand takes a new position
-    (shifts, thumb passing, wide arpeggios) or starts again after a rest, which is how
-    fingering is usually marked in printed music; "none" prints nothing.
+    mode "all" prints every fingered event; "none" prints nothing. "smart" prints a fingering
+    where the hand has to move (a shift, a stretch beyond the comfortable span, a thumb
+    crossing) or comes back in after a rest, and does not repeat a move it has already marked
+    in the last REMIND_AFTER bars, which is how fingering is marked in printed music.
     """
-    from .fingering import finger_events, hand_position
+    from .fingering import finger_events
 
     out: list[dict[int, int] | None] = [None] * len(events)
     if mode == "none":
         return out
+    idx = [i for i, ev in enumerate(events) if ev.tie in (None, "start")]  # tied pieces are held, not struck
+    fingered = finger_events([(float(events[i].start), events[i].pitches) for i in idx], hand, seconds_per_ql)
+    by_event = dict(zip(idx, fingered))
+    prev, prev_end = None, None
+    marked: dict[tuple, Fraction] = {}  # move -> where it was last printed
+    for i, ev in enumerate(events):
+        if i not in by_event:  # continuation of a tie
+            prev_end = ev.end
+            continue
+        f = by_event[i]
+        if f is None:
+            prev = None
+            continue
+        if mode == "all":
+            out[i] = f
+        else:
+            rested = prev_end is not None and ev.start - prev_end >= beat_ql
+            if prev is None or rested:
+                move = ("enter", tuple(sorted(f.values())))
+                show = True
+            else:
+                show = not _same_position(prev, f, hand)
+                # the same fingers making the same move (transposed or not) need no second mark
+                move = (tuple(sorted(prev.values())), tuple(sorted(f.values())), min(f) - min(prev))
+            if show and (move not in marked or ev.start - marked[move] >= REMIND_AFTER * bar_ql):
+                out[i] = f
+                marked[move] = ev.start
+        prev, prev_end = f, ev.end
+    return out
     idx = [i for i, ev in enumerate(events) if ev.tie in (None, "start")]  # tied pieces are held, not struck
     fingered = finger_events([(float(events[i].start), events[i].pitches) for i in idx], hand, seconds_per_ql)
     by_event = dict(zip(idx, fingered))
@@ -277,9 +369,9 @@ def build_score(
                 part.insert(0, ped)
 
         hand = name[0]
-        events = staff_events(qnotes, meter, pedal)
+        events = staff_events(qnotes, meter, pedal, melody=hand == "R")
         seconds_per_ql = 60.0 / bpm / float(meter.beat_ql)
-        marks = fingering_marks(events, hand, fingering, seconds_per_ql, meter.beat_ql)
+        marks = fingering_marks(events, hand, fingering, seconds_per_ql, meter.beat_ql, bar_ql)
         cursor = Fraction(0)
         for ev, mark in zip(events, marks):
             if ev.start > cursor:

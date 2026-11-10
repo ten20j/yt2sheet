@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from yt2sheet.hands import split_hands
-from yt2sheet.rhythm import Meter, align_to_barlines, choose_beat_octave, quantize, tempo_bpm, track_beats
+from yt2sheet.meter import metric_grid
+from yt2sheet.rhythm import Meter, quantize, trim_leading_bars
 from yt2sheet.score import build_score
 
 from pieces import BALLAD, PIECES, perform, truth_notes
@@ -14,9 +15,9 @@ from pieces import BALLAD, PIECES, perform, truth_notes
 def notate(piece, seed):
     meter = Meter.parse(piece[0])
     notes = perform(piece, seed=seed)
-    beats = choose_beat_octave(notes, track_beats(notes), meter)
-    q, _ = align_to_barlines(quantize(notes, beats, meter), meter)
-    return meter, beats, q
+    grid = metric_grid(notes, meter)
+    q, _ = trim_leading_bars(quantize(notes, grid, meter), meter)
+    return meter, grid, q
 
 
 def onset_accuracy(piece, q) -> float:
@@ -71,8 +72,8 @@ def test_score_builds_and_exports(name, tmp_path):
 
 
 def test_fast_continuous_motion_is_notated_as_eighths():
-    meter, beats, q = notate(BALLAD, 0)
-    assert 60 <= tempo_bpm(beats) <= 85
+    meter, grid, q = notate(BALLAD, 0)
+    assert grid.pulses_per_beat == 2 and 60 <= grid.bpm <= 85
     assert onset_accuracy(BALLAD, q) >= 0.95
 
 

@@ -71,7 +71,8 @@ A 4-minute piece takes about 2 minutes on a 4-core CPU; with an NVIDIA GPU add `
 | `--reach 14` | widest chord one hand plays at once, in semitones (default 12 = octave; 14 for large hands) |
 | `--keep-doublings` | never drop octave-doubled notes from too-wide chords (they are rolled instead) |
 | `--split-point 60` | fixed hand split at middle C instead of the automatic one |
-| `--downbeat 1` | the barlines are shifted; this moves the first downbeat by N beats |
+| `--downbeat 1` | the barlines are shifted; this moves them by N beats |
+| `--strict-meter` | keep the beat grid exactly as tracked (no re-alignment at phrase endings) |
 | `--cookies cookies.txt` | YouTube asks you to sign in |
 | `--engine verovio` | use Verovio instead of LilyPond for the PDF |
 
@@ -87,10 +88,21 @@ with different options: `yt2sheet output/my-piece-performance.mid --time-signatu
   transcribed notes. The tracker's 2-vs-3 grouping mistakes (e.g. triplet arpeggios) are corrected
   by checking at which beat length the same pitches recur. Fast continuous motion in even meters is
   written as 8ths at half tempo.
-- **Rhythm**: onsets are mapped onto the beat grid (following tempo changes) and snapped to a
+- **Meter**: a beat tracker slips in expressive playing: when the pianist lingers at a phrase
+  ending it counts one pulse too many or too few, and every barline after that is shifted (bass
+  notes land on the "and", everything is tied over the barline). So each pulse is given a
+  position in the bar by dynamic programming: positions normally count up, but the search may
+  insert or drop a pulse, at a cost, when that puts the bass notes and pedal changes that follow
+  back on strong beats. Dropping a pulse that has notes on it is expensive, so corrections land
+  in held notes and pauses, where rubato happens. A lone chord (a free-time introduction)
+  defines its own pulse and is placed on a strong beat. Notes of the two hands struck up to a
+  tenth of a second apart count as one event.
+- **Rhythm**: onsets are mapped onto that grid (following tempo changes) and snapped to a
   metrical grid that prefers simpler rhythms; each beat may switch to triplets when they clearly fit
-  better. Long notes' ends snap more coarsely (key releases are imprecise), and notes released under
-  the sustain pedal are written to the next note instead of with rests.
+  better. Long notes' ends snap more coarsely (key releases are imprecise). A note released
+  under the sustain pedal is written to the next note. In the right hand that may tie it over
+  the barline (the melody is still singing); in the left hand a note only the pedal sustains
+  stays inside its bar with a plain length (no double dots) and rests after it.
 - **Simple rhythm** (default): a note that would be written on a 16th keeps that rhythm only
   if it has a partner a 16th away in the same register (the beat a dotted rhythm leads into,
   the beat it follows, or a run). A lone note pushed off the beat by expressive timing is
@@ -98,15 +110,16 @@ with different options: `yt2sheet output/my-piece-performance.mid --time-signatu
   timing as played.
 - **Grace notes**: a short note a step away from a longer note struck right after it is an
   ornament, and is engraved as a small slashed grace note rather than as a 16th.
-- **Barlines**: the downbeat is placed where accented, long bass notes fall.
 - **Hands**: every onset's notes are split into a lower (LH) and upper (RH) part. A beam search
-  over the whole piece picks the splits with the lowest total cost: distance from each hand's
-  recent notes, a span limit that includes notes still held, crossed hands, splitting a
-  close chord between the hands, the left hand taking the melody, and the right hand taking a
-  soft note out of a left-hand broken chord (so a figure stays in one hand instead of the hands
-  alternating). Melody is recognised by loudness relative to the surrounding two beats
-  (pianists bring the melody out), so a melody note that dips below middle C stays in the
-  right hand while the accompaniment around it stays in the left.
+  over the whole piece picks the splits with the lowest total cost. The model is the usual
+  piano texture: the right hand carries the melody and the notes close under it, the left hand
+  the accompaniment. Melody is recognised by loudness relative to the surrounding two beats
+  (pianists bring the melody out) and by forming a line (a loud note far below the melody is an
+  accent, not melody). The costs: distance from each hand's recent notes; a span limit that
+  includes notes still held; crossed hands; splitting a close chord; the left hand taking the
+  melody; the right hand taking a soft note far below its melody, out of a left-hand broken
+  chord, or deep in the bass; either hand re-striking a key the other just played. When
+  nothing is singing, the accompaniment goes to the left hand.
 - **Playability**: a chord one hand cannot reach (`--reach`, default an octave) gives a note to the
   other hand if it fits there, else drops an octave doubling (never the melody or bass note), else
   is marked as rolled. A hand never gets more than five notes at once.
@@ -114,8 +127,9 @@ with different options: `yt2sheet output/my-piece-performance.mid --time-signatu
   Parncutt et al. (1997): comfortable and practical spans per finger pair, weak fingers, thumb on
   black keys, thumb passing, and three-note hand-position rules. It is solved exactly with a
   second-order Viterbi search, so a fingering is chosen with the following notes in mind. With
-  `smart` fingering, numbers are printed where the hand changes position or starts after a rest,
-  as in printed music.
+  `smart` fingering, a number is printed where the hand has to move (a shift, a stretch beyond
+  the comfortable span, a thumb crossing) or comes back in after a rest, and a move that was
+  already marked is not marked again for eight bars, as in printed music.
 - **Notation**: key detection (Krumhansl-Schmuckler via music21), key-aware note spelling, then
   music21 for measures, ties and beams, and LilyPond for engraving.
 
@@ -124,7 +138,8 @@ with different options: `yt2sheet output/my-piece-performance.mid --time-signatu
 Automatic transcription gives a solid first draft rather than a publication-ready score. It works
 best on solo piano recordings. Expect to fix things in MuseScore using the `.musicxml`:
 
-- Rubato-heavy or free-time passages (intros, cadenzas) get awkward rhythms.
+- Very free passages (cadenzas) can still get awkward rhythms; meter following relies on bass
+  notes and pedal changes marking the strong beats.
 - Each staff is one chord stream; a held melody note under moving inner voices is shortened.
 - Fingering is a good starting point, not a teacher: it follows a published ergonomic model and
   gets standard scales, triads and Alberti basses right, but it does not know your hand size.
@@ -150,5 +165,7 @@ spread left-hand chords and the Alberti bass.
 The tests also render small ground-truth pieces (an Alberti-bass minuet, a triplet nocturne, a waltz, a
 fast arpeggio ballad) as humanized performances with timing jitter, early releases and tempo drift.
 They check that onsets, triplets, hands and key come back correctly, and that the hand split
-leaves no chord wider than an octave and no crossed hands. `tests/make_test_piece.py`
+leaves no chord wider than an octave and no crossed hands. Further tests cover a rubato pause
+(the barlines must stay with the bass notes), free-time chords, the melody/accompaniment split,
+pedal-sustained note lengths and where finger numbers are printed. `tests/make_test_piece.py`
 also synthesizes audio with FluidSynth for a full audio-to-PDF check.
